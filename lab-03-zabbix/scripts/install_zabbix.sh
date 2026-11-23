@@ -7,27 +7,65 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 [[ "${EUID}" -eq 0 ]] || die "Запусти сценарий от root: sudo bash install_zabbix.sh"
 [[ -r /etc/os-release ]] || die "Не найден /etc/os-release"
 . /etc/os-release
-[[ "${ID:-}" == "ubuntu" && "${VERSION_ID:-}" == "22.04" ]] || die "Поддерживается Ubuntu 22.04; обнаружено: ${PRETTY_NAME:-unknown}"
+[[ "${ID:-}" == "ubuntu" ]] || die "Поддерживается Ubuntu; обнаружено: ${PRETTY_NAME:-unknown}"
+
+case "${VERSION_ID:-}" in
+  22.04) UBUNTU_CODENAME="jammy" ;;
+  24.04) UBUNTU_CODENAME="noble" ;;
+  26.04) UBUNTU_CODENAME="resolute" ;;
+  *) die "Поддерживаются Ubuntu 22.04, 24.04 и 26.04; обнаружено: ${PRETTY_NAME:-unknown}" ;;
+esac
+
+if [[ -n "${VERSION_CODENAME:-}" && "$VERSION_CODENAME" != "$UBUNTU_CODENAME" ]]; then
+  die "Кодовое имя ОС не совпадает с VERSION_ID: ${VERSION_CODENAME} != $UBUNTU_CODENAME"
+fi
+
 command -v systemctl >/dev/null || die "Не обнаружен systemd"
 command -v openssl >/dev/null || die "Установи openssl перед запуском"
+command -v dpkg >/dev/null || die "Не обнаружен dpkg"
 
 export DEBIAN_FRONTEND=noninteractive
-log "Обновление индексов APT"
+
+# Remove a repository package configured for another Ubuntu release.
+# This is important when upgrading this lab script after an earlier failed run.
+if dpkg-query -W -f='${db:Status-Status}' zabbix-release 2>/dev/null | grep -qx "installed"; then
+  log "Удаление ранее установленного пакета zabbix-release для переустановки под $UBUNTU_CODENAME"
+  dpkg --remove zabbix-release
+fi
+for old_source in /etc/apt/sources.list.d/zabbix.list /etc/apt/sources.list.d/zabbix.sources; do
+  if [[ -f "$old_source" ]]; then
+    cp -a "$old_source" "${old_source}.pre-lab.$(date +%Y%m%d%H%M%S)"
+    rm -f "$old_source"
+  fi
+done
+
+log "Обновление индексов APT для Ubuntu $VERSION_ID ($UBUNTU_CODENAME)"
 apt-get update
 
 repo_deb="$(mktemp --suffix=.deb)"
-trap 'rm -f "$repo_deb"' EXIT
-repo_url="https://repo.zabbix.com/zabbix/7.4/release/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_7.4+ubuntu22.04_all.deb"
-log "Загрузка официального пакета репозитория Zabbix 7.4"
-wget -q -O "$repo_deb" "$repo_url" || die "Не удалось скачать пакет репозитория Zabbix"
+mysql_defaults=""
+cleanup() {
+  rm -f "$repo_deb"
+  [[ -z "$mysql_defaults" ]] || rm -f "$mysql_defaults"
+}
+trap cleanup EXIT
+
+repo_url="https://repo.zabbix.com/zabbix/7.4/release/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_7.4+ubuntu${VERSION_ID}_all.deb"
+log "Загрузка официального репозитория Zabbix 7.4 для Ubuntu $VERSION_ID"
+wget -q -O "$repo_deb" "$repo_url" || die "Не удалось скачать пакет репозитория Zabbix: $repo_url"
 dpkg -i "$repo_deb"
 apt-get update
 
-log "Установка MySQL, Zabbix, Nginx и PHP-модулей"
-apt-get install -y mysql-server zabbix-server-mysql zabbix-frontend-php zabbix-nginx-conf zabbix-sql-scripts zabbix-agent nginx locales php8.1-fpm php8.1-mysql php8.1-gd php8.1-xml php8.1-bcmath php8.1-mbstring php8.1-curl php8.1-ldap
+log "Установка MySQL, Zabbix, Nginx и PHP-модулей из репозиториев текущей Ubuntu"
+apt-get install -y mysql-server zabbix-server-mysql zabbix-frontend-php zabbix-nginx-conf zabbix-sql-scripts zabbix-agent nginx locales php-fpm php-mysql php-gd php-xml php-bcmath php-mbstring php-curl php-ldap
 locale-gen en_US.UTF-8
 
+PHP_VERSION="$(php -r 'printf("%d.%d", PHP_MAJOR_VERSION, PHP_MINOR_VERSION);')"
+PHP_FPM_SERVICE="php${PHP_VERSION}-fpm"
+PHP_FPM_INI="/etc/php/${PHP_VERSION}/fpm/php.ini"
+[[ -d "/etc/php/${PHP_VERSION}/fpm" ]] || die "Не найден каталог PHP-FPM для PHP $PHP_VERSION"
 systemctl enable --now mysql
+
 DB_PASS_FILE="/root/.zabbix-db-password"
 if [[ -s "$DB_PASS_FILE" ]]; then
   DB_PASS="$(cat "$DB_PASS_FILE")"
@@ -37,7 +75,6 @@ else
   printf '%s\n' "$DB_PASS" > "$DB_PASS_FILE"
   chmod 600 "$DB_PASS_FILE"
 fi
-export DB_PASS
 
 log "Создание базы данных и пользователя Zabbix"
 mysql --protocol=socket -uroot <<SQL
@@ -53,7 +90,6 @@ if [[ "$table_count" -eq 0 ]]; then
   log "Импорт начальной схемы Zabbix"
   mysql_defaults="$(mktemp)"
   chmod 600 "$mysql_defaults"
-  trap 'rm -f "$repo_deb" "$mysql_defaults"' EXIT
   cat > "$mysql_defaults" <<SQL
 [client]
 user=zabbix
@@ -62,6 +98,7 @@ default-character-set=utf8mb4
 SQL
   zcat /usr/share/zabbix/sql-scripts/mysql/server.sql.gz | mysql --defaults-extra-file="$mysql_defaults" zabbix
   rm -f "$mysql_defaults"
+  mysql_defaults=""
 else
   log "В базе уже есть таблицы; повторный импорт пропущен"
 fi
@@ -97,7 +134,7 @@ chmod 640 "$server_conf"
 
 log "Настройка Nginx: порт 8080 и server_name localhost"
 nginx_conf="/etc/zabbix/nginx.conf"
-[[ -f "$nginx_conf" ]] || die "Не найден $nginx_conf"
+[[ -f "$nginx_conf" ]] || die "Не найден $nginx_conf (проверь пакет zabbix-nginx-conf)"
 cp -an "$nginx_conf" "${nginx_conf}.pre-lab" || true
 python3 - "$nginx_conf" <<'PY'
 import pathlib
@@ -118,27 +155,25 @@ for line in lines:
     else:
         result.append(line)
 if not listen_seen:
-    raise SystemExit("В nginx.conf не найдена директива listen; настрой порт 8080 вручную по README")
+    raise SystemExit("В nginx.conf не найдена директива listen; настрой порт 8080 вручную")
 if not server_seen:
-    raise SystemExit("В nginx.conf не найдена директива server_name; настрой localhost вручную по README")
+    raise SystemExit("В nginx.conf не найдена директива server_name; настрой localhost вручную")
 path.write_text("\n".join(result) + "\n")
 PY
 
+# The Zabbix package normally creates this include. On package variants that
+# do not, add a symlink so the distribution's nginx.conf loads the Zabbix vhost.
 nginx_link="/etc/nginx/conf.d/zabbix.conf"
-if [[ -L "$nginx_link" ]]; then
-  :
-elif [[ -e "$nginx_link" ]]; then
-  cp -a "$nginx_link" "${nginx_link}.pre-lab"
-  rm -f "$nginx_link"
-  ln -s "$nginx_conf" "$nginx_link"
-else
+if [[ ! -e "$nginx_link" && ! -L "$nginx_link" ]]; then
   ln -s "$nginx_conf" "$nginx_link"
 fi
 
-php_ini="/etc/php/8.1/fpm/php.ini"
-if [[ -f "$php_ini" ]]; then
-  cp -an "$php_ini" "${php_ini}.pre-lab" || true
-  sed -ri 's|^[;[:space:]]*date.timezone[[:space:]]*=.*|date.timezone = Europe/Moscow|' "$php_ini"
+log "Настройка часового пояса PHP $PHP_VERSION"
+cp -an "$PHP_FPM_INI" "${PHP_FPM_INI}.pre-lab" || true
+if grep -qE '^[;[:space:]]*date\.timezone[[:space:]]*=' "$PHP_FPM_INI"; then
+  sed -ri 's|^[;[:space:]]*date\.timezone[[:space:]]*=.*|date.timezone = Europe/Moscow|' "$PHP_FPM_INI"
+else
+  printf '\ndate.timezone = Europe/Moscow\n' >> "$PHP_FPM_INI"
 fi
 
 log "Настройка локального агента"
@@ -172,10 +207,12 @@ PY
 log "Проверка конфигурации Nginx"
 nginx -t
 log "Включение и перезапуск сервисов"
-systemctl enable mysql nginx php8.1-fpm zabbix-server zabbix-agent
-systemctl restart mysql php8.1-fpm zabbix-server zabbix-agent nginx
+systemctl enable mysql nginx "$PHP_FPM_SERVICE" zabbix-server zabbix-agent
+systemctl restart mysql "$PHP_FPM_SERVICE" zabbix-server zabbix-agent nginx
 
 log "Установка завершена"
+printf 'Ubuntu: %s (%s)\n' "$VERSION_ID" "$UBUNTU_CODENAME"
+printf 'PHP-FPM: %s\n' "$PHP_FPM_SERVICE"
 printf 'Frontend: http://localhost:8080\n'
 printf 'DB password file (root only): %s\n' "$DB_PASS_FILE"
 printf 'Agent hostname: Zabbix-local\n'

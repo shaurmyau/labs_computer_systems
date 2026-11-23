@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-services=(mysql zabbix-server zabbix-agent php8.1-fpm nginx)
+if ! command -v php >/dev/null 2>&1; then
+  printf 'FAILED  PHP CLI is not installed; cannot detect PHP-FPM service\n' >&2
+  exit 1
+fi
+php_version="$(php -r 'printf("%d.%d", PHP_MAJOR_VERSION, PHP_MINOR_VERSION);')"
+services=(mysql zabbix-server zabbix-agent "php${php_version}-fpm" nginx)
 failed=0
 for service in "${services[@]}"; do
   if systemctl is-active --quiet "$service"; then
