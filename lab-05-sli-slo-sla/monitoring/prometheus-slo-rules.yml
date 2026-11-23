@@ -1,0 +1,79 @@
+groups:
+  - name: orderflow.sli.recording
+    interval: 1m
+    rules:
+      - record: orderflow:eligible_requests:rate5m
+        expr: |
+          sum(rate(http_requests_total{
+            service="orderflow",
+            route!~"/health|/metrics",
+            code!~"4.."
+          }[5m]))
+      - record: orderflow:successful_requests:rate5m
+        expr: |
+          sum(rate(http_requests_total{
+            service="orderflow",
+            route!~"/health|/metrics",
+            code=~"2..|3.."
+          }[5m]))
+      - record: orderflow:availability:ratio_rate5m
+        expr: |
+          orderflow:successful_requests:rate5m
+          /
+          clamp_min(orderflow:eligible_requests:rate5m, 1e-9)
+      - record: orderflow:latency:p95_5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(http_request_duration_seconds_bucket{
+                service="orderflow",
+                route!~"/health|/metrics",
+                code!~"4.."
+              }[5m])
+            )
+          )
+      - record: orderflow:orders_visible_60s:ratio
+        expr: |
+          sum(increase(orders_verified_within_60s_total{service="orderflow"}[30d]))
+          /
+          clamp_min(sum(increase(orders_accepted_total{service="orderflow"}[30d])), 1)
+
+  - name: orderflow.slo.alerts
+    rules:
+      - alert: OrderFlowAvailabilityBurn
+        expr: orderflow:availability:ratio_rate5m < 0.9995
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OrderFlow availability is below the 99.95% SLO target"
+          description: "Check API 5xx, timeouts, load balancer and database health."
+
+      - alert: OrderFlowLatencyP95High
+        expr: orderflow:latency:p95_5m > 0.4
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OrderFlow API p95 latency exceeds 400 ms"
+          description: "Inspect slow endpoints, database queries and resource saturation."
+
+      - alert: OrderFlowOrderIntegrityLow
+        expr: orderflow:orders_visible_60s:ratio < 0.9999
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "OrderFlow order visibility is below the 99.99% SLO target"
+          description: "Reconcile accepted orders with persisted and readable orders."
+
+# Instrumentation contract:
+# - http_requests_total has labels service, route, code.
+# - http_request_duration_seconds_bucket is a Prometheus histogram.
+# - orders_accepted_total increments after API acceptance.
+# - orders_verified_within_60s_total increments once per accepted order that
+#   can be read back within 60 seconds. Deduplicate by order_id in the app.
+# The 30d order-integrity rule is a rolling-window ratio.
+# Production alerting should also use multi-window/multi-burn-rate rules and
+# explicit handling of zero traffic; these educational rules show the SLI mapping.
