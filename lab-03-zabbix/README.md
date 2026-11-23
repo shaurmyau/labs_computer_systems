@@ -2,15 +2,17 @@
 
 ## Цель
 
-Развернуть Zabbix Server, Frontend и Agent на Ubuntu Server 22.04, использовать MySQL, проверить работу сервисов, зарегистрировать локальный узел и создать триггер на загрузку CPU выше 80% в течение пяти минут.
+Развернуть Zabbix Server, Frontend и Agent с MySQL, проверить работу сервисов, зарегистрировать локальный узел и создать триггер на загрузку CPU выше 80% в течение пяти минут.
 
-## Требования к среде
+## Поддерживаемая среда
 
-- Ubuntu Server 22.04 LTS, архитектура amd64.
+- Ubuntu Server 22.04 LTS (jammy), 24.04 LTS (noble) или 26.04 LTS (resolute), amd64.
 - Пользователь root или запуск через sudo.
 - Доступ в Интернет для загрузки пакетов Zabbix 7.4 и Ubuntu.
 - Не менее 2 CPU, 4 ГБ RAM и 20 ГБ свободного места для учебной ВМ.
 - Свободные TCP-порты 80/8080, 10050 и 10051.
+
+Для Ubuntu 26.04 устанавливается PHP 8.5 из штатного репозитория Ubuntu; для других поддерживаемых выпусков используется PHP по умолчанию соответствующего релиза. Используются метапакеты php-fpm и php-*, поэтому имя службы PHP-FPM определяется после установки автоматически. Zabbix 7.4 поддерживает PHP 8.5 начиная с версии 7.4.9.
 
 ## Установка
 
@@ -20,9 +22,9 @@
 sudo bash lab-03-zabbix/scripts/install_zabbix.sh
 ~~~
 
-Сценарий проверяет ОС, устанавливает репозиторий Zabbix 7.4 для Ubuntu 22.04, MySQL Server и компоненты Zabbix, создаёт базу и пользователя, импортирует схему только при пустой БД, сохраняет сгенерированный пароль в защищённом файле /root/.zabbix-db-password с правами 0600, настраивает Nginx на 8080, часовой пояс PHP и имя локального агента Zabbix-local.
+Сценарий определяет выпуск Ubuntu, удаляет устаревший пакет/источник zabbix-release от предыдущей попытки (сохраняя резервную копию файла источника), подключает официальный репозиторий Zabbix 7.4 для соответствующего выпуска, устанавливает MySQL, Zabbix, Nginx и PHP-модули. Затем создаёт базу и пользователя, импортирует схему только при пустой БД, сохраняет сгенерированный пароль в защищённом файле /root/.zabbix-db-password с правами 0600, настраивает Nginx на 8080, часовой пояс PHP и имя локального агента Zabbix-local.
 
-Сценарий рассчитан на чистую учебную машину. Перед запуском на существующем сервере проверь конфликты с текущими MySQL/Nginx и сделай резервные копии конфигураций.
+Сценарий рассчитан на чистую учебную машину. Перед запуском на существующем сервере проверь конфликты с текущими MySQL/Nginx и сделай резервные копии конфигураций. Удаление старого пакета zabbix-release не удаляет установленные серверные пакеты или базу данных.
 
 После установки открой http://localhost:8080. Учётные данные Frontend по умолчанию: Admin / zabbix. В мастере настройки выбери MySQL, хост localhost, базу zabbix, пользователя zabbix. Пароль возьми из файла:
 
@@ -52,7 +54,8 @@ sudo python3 lab-03-zabbix/scripts/configure_host.py
 
 ~~~bash
 sudo bash lab-03-zabbix/scripts/check_services.sh
-sudo systemctl status zabbix-server zabbix-agent nginx mysql php8.1-fpm
+sudo systemctl status zabbix-server zabbix-agent nginx mysql
+sudo systemctl status "$(php -r 'printf("php%d.%d-fpm", PHP_MAJOR_VERSION, PHP_MINOR_VERSION);')"
 sudo ss -lntp | grep -E ':8080|:10050|:10051'
 ~~~
 
@@ -65,7 +68,7 @@ sudo ss -lntp | grep -E ':8080|:10050|:10051'
 ## Типовые проблемы
 
 - Server не стартует: проверь DBPassword в /etc/zabbix/zabbix_server.conf и журнал journalctl -u zabbix-server -n 100.
-- Frontend не открывается: проверь nginx -t, systemctl status nginx php8.1-fpm и порт 8080.
+- Frontend не открывается: проверь nginx -t, systemctl status nginx, systemctl status с автоматически определяемой службой PHP-FPM и порт 8080.
 - Агент недоступен: проверь systemctl status zabbix-agent, Hostname=Zabbix-local, Server/ServerActive и доступность 127.0.0.1:10050.
 - Нет CPU item: проверь привязку шаблона и перечень Items.
 - Триггер не срабатывает: проверь Latest data, точный ключ CPU item, выражение и историю значений за последние пять минут.
