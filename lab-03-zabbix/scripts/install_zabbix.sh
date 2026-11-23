@@ -23,8 +23,9 @@ wget -q -O "$repo_deb" "$repo_url" || die "Не удалось скачать п
 dpkg -i "$repo_deb"
 apt-get update
 
-log "Установка MySQL и компонентов Zabbix"
-apt-get install -y mysql-server zabbix-server-mysql zabbix-frontend-php zabbix-nginx-conf zabbix-sql-scripts zabbix-agent nginx php8.1-fpm php8.1-mysql locales
+log "Установка MySQL, Zabbix, Nginx и PHP-модулей"
+apt-get install -y mysql-server zabbix-server-mysql zabbix-frontend-php zabbix-nginx-conf zabbix-sql-scripts zabbix-agent nginx locales php8.1-fpm php8.1-mysql php8.1-gd php8.1-xml php8.1-bcmath php8.1-mbstring php8.1-curl php8.1-ldap
+locale-gen en_US.UTF-8
 
 systemctl enable --now mysql
 DB_PASS_FILE="/root/.zabbix-db-password"
@@ -50,7 +51,17 @@ SQL
 table_count="$(mysql --protocol=socket -uroot -Nse "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='zabbix'")"
 if [[ "$table_count" -eq 0 ]]; then
   log "Импорт начальной схемы Zabbix"
-  zcat /usr/share/zabbix/sql-scripts/mysql/server.sql.gz | mysql --default-character-set=utf8mb4 -uzabbix -p"$DB_PASS" zabbix
+  mysql_defaults="$(mktemp)"
+  chmod 600 "$mysql_defaults"
+  trap 'rm -f "$repo_deb" "$mysql_defaults"' EXIT
+  cat > "$mysql_defaults" <<SQL
+[client]
+user=zabbix
+password=$DB_PASS
+default-character-set=utf8mb4
+SQL
+  zcat /usr/share/zabbix/sql-scripts/mysql/server.sql.gz | mysql --defaults-extra-file="$mysql_defaults" zabbix
+  rm -f "$mysql_defaults"
 else
   log "В базе уже есть таблицы; повторный импорт пропущен"
 fi
@@ -81,6 +92,7 @@ if not updated:
     result.append("DBPassword=" + password)
 path.write_text("\n".join(result) + "\n")
 PY
+chown root:zabbix "$server_conf"
 chmod 640 "$server_conf"
 
 log "Настройка Nginx: порт 8080 и server_name localhost"
@@ -111,8 +123,16 @@ if not server_seen:
     raise SystemExit("В nginx.conf не найдена директива server_name; настрой localhost вручную по README")
 path.write_text("\n".join(result) + "\n")
 PY
-if [[ ! -e /etc/nginx/conf.d/zabbix.conf ]]; then
-  ln -s /etc/zabbix/nginx.conf /etc/nginx/conf.d/zabbix.conf
+
+nginx_link="/etc/nginx/conf.d/zabbix.conf"
+if [[ -L "$nginx_link" ]]; then
+  :
+elif [[ -e "$nginx_link" ]]; then
+  cp -a "$nginx_link" "${nginx_link}.pre-lab"
+  rm -f "$nginx_link"
+  ln -s "$nginx_conf" "$nginx_link"
+else
+  ln -s "$nginx_conf" "$nginx_link"
 fi
 
 php_ini="/etc/php/8.1/fpm/php.ini"
@@ -125,8 +145,29 @@ log "Настройка локального агента"
 agent_conf="/etc/zabbix/zabbix_agentd.conf"
 [[ -f "$agent_conf" ]] || die "Не найден $agent_conf"
 cp -an "$agent_conf" "${agent_conf}.pre-lab" || true
-sed -ri '/^[[:space:]#]*Hostname[[:space:]]*=/d' "$agent_conf"
-printf '\nHostname=Zabbix-local\n' >> "$agent_conf"
+python3 - "$agent_conf" <<'PY'
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+values = {"Server": "127.0.0.1", "ServerActive": "127.0.0.1", "Hostname": "Zabbix-local"}
+lines = path.read_text().splitlines()
+result = []
+seen = set()
+for line in lines:
+    matched = next((key for key in values if re.match(r"^\s*#?\s*" + re.escape(key) + r"\s*=", line)), None)
+    if matched:
+        if matched not in seen:
+            result.append(matched + "=" + values[matched])
+            seen.add(matched)
+    else:
+        result.append(line)
+for key, value in values.items():
+    if key not in seen:
+        result.append(key + "=" + value)
+path.write_text("\n".join(result) + "\n")
+PY
 
 log "Проверка конфигурации Nginx"
 nginx -t

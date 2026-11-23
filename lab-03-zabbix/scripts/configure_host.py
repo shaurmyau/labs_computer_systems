@@ -124,6 +124,12 @@ def main() -> int:
     except (RuntimeError, KeyError, IndexError) as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if api.token:
+            try:
+                api.call("user.logout", {})
+            except RuntimeError:
+                pass
 
 
 if __name__ == "__main__":
