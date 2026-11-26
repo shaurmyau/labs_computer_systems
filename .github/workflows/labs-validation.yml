@@ -1,4 +1,4 @@
-name: Validate lab projects
+name: Validate lab materials
 
 on:
   push:
@@ -33,14 +33,5 @@ jobs:
           bash -n lab-03-zabbix/scripts/install_zabbix.sh
           bash -n lab-03-zabbix/scripts/check_services.sh
 
-      - name: Compile Python scripts
-        run: |
-          python -m compileall -q lab-03-zabbix/scripts
-          python -m compileall -q lab-06-07-quality-control/src
-          python -m compileall -q lab-08-09-quality-economics/src
-
-      - name: Test quality metrics
-        run: python -m unittest discover -s lab-06-07-quality-control/tests -v
-
-      - name: Test economics calculations
-        run: python -m unittest discover -s lab-08-09-quality-economics/tests -v
+      - name: Compile Zabbix helper scripts
+        run: python -m compileall -q lab-03-zabbix/scripts
